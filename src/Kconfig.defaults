@@ -1,0 +1,5 @@
+config MAIN_LOG_LEVEL
+	default 4
+
+config MODULE_LED_LOG_LEVEL
+	default 4
