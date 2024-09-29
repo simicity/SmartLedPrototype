@@ -8,30 +8,12 @@
 #define LED_APP_3 2
 #define LED_APP_4 3
 
+// RGB of LED
 #define RED 0
 #define GREEN 1
 #define BLUE 2
 
-enum led_color {
-	LED_COLOR_OFF, /* 000 */
-	LED_COLOR_RED, /* 001 */
-	LED_COLOR_GREEN, /* 010 */
-	LED_COLOR_YELLOW, /* 011 */
-	LED_COLOR_BLUE, /* 100 */
-	LED_COLOR_MAGENTA, /* 101 */
-	LED_COLOR_CYAN, /* 110 */
-	LED_COLOR_WHITE, /* 111 */
-	LED_COLOR_NUM,
-};
-
-enum led_state {
-	LED_OFF,
-	LED_SOLID,
-	LED_BLINK,
-};
-
-#define LED_SERVICE_UUID_VAL \
-  BT_UUID_128_ENCODE(0xf7547938, 0x68ba, 0x11ec, 0x90d6, 0x0242ac120003)
+#define LED_SERVICE_UUID_VAL BT_UUID_128_ENCODE(0xf7547938, 0x68ba, 0x11ec, 0x90d6, 0x0242ac120003)
 
 /**
  * @brief Set the state of a given LED unit to blink.

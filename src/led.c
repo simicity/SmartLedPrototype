@@ -1,5 +1,3 @@
-#include "led.h"
-
 #include <zephyr/kernel.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/bluetooth/bluetooth.h>
@@ -9,6 +7,11 @@
 #include <string.h>
 #include <stdlib.h>
 #include <zephyr/device.h>
+
+#include "led.h"
+#include <pb_encode.h>
+#include <pb_decode.h>
+#include "proto/led/led.pb.h"
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(led, CONFIG_MODULE_LED_LOG_LEVEL);
@@ -31,8 +34,8 @@ enum led_type {
 };
 
 struct user_config {
-	bool blink;
-	enum led_color color;
+	LedStateType state;
+	LedColorType color;
 };
 
 struct led_unit_cfg {
@@ -49,16 +52,11 @@ static uint8_t leds_num;
 static bool initialized;
 static struct led_unit_cfg led_units[LED_UNIT_MAX];
 
-struct led_control {
-	enum led_state state;
-	enum led_color color;
-};
-
-static struct led_control led_states[LED_UNIT_MAX];
-
 // Service and Characteristics UUIDs
-static struct bt_uuid_128 led_state_char_uuid = BT_UUID_INIT_128(
+static struct bt_uuid_128 get_led_char_uuid = BT_UUID_INIT_128(
     BT_UUID_128_ENCODE(0x9c85a726, 0xb7f1, 0x11ec, 0xb909, 0x0242ac120002));
+static struct bt_uuid_128 put_led_char_uuid = BT_UUID_INIT_128(
+    BT_UUID_128_ENCODE(0x9c85a726, 0xb7f1, 0x11ec, 0xb909, 0x0242ac120003));
 
 static struct bt_uuid_128 led_svc_uuid = BT_UUID_INIT_128(LED_SERVICE_UUID_VAL);
 
@@ -145,7 +143,7 @@ static int led_device_tree_parse(void)
 /**
  * @brief Internal handling to set the status of a led unit
  */
-static int led_set_int(uint8_t led_unit, enum led_color color)
+static int led_set_int(uint8_t led_unit, LedColorType color)
 {
 	int ret;
 
@@ -203,14 +201,14 @@ static void led_blink_work_handler(struct k_work *work)
 	static bool on_phase;
 
 	for (uint8_t i = 0; i < leds_num; i++) {
-		if (led_units[i].user_cfg.blink) {
+		if (led_units[i].user_cfg.state == LedStateType_LED_STATE_TYPE_BLINK) {
 			if (on_phase) {
 				ret = led_set_int(i, led_units[i].user_cfg.color);
 				if (ret) {
 					LOG_ERR("LED set error: %d", ret);
 				}
 			} else {
-				ret = led_set_int(i, LED_COLOR_OFF);
+				ret = led_set_int(i, LedStateType_LED_STATE_TYPE_OFF);
 				if (ret) {
 					LOG_ERR("LED set error: %d", ret);
 				}
@@ -221,7 +219,7 @@ static void led_blink_work_handler(struct k_work *work)
 	on_phase = !on_phase;
 }
 
-static int led_set(uint8_t led_unit, enum led_color color, enum led_state state)
+static int led_set(uint8_t led_unit, LedColorType color, LedStateType state)
 {
 	int ret;
 
@@ -234,7 +232,7 @@ static int led_set(uint8_t led_unit, enum led_color color, enum led_state state)
 		return ret;
 	}
 
-	led_units[led_unit].user_cfg.blink = (state == LED_BLINK);
+	led_units[led_unit].user_cfg.state = state;
 	led_units[led_unit].user_cfg.color = color;
 
 	return 0;
@@ -243,7 +241,7 @@ static int led_set(uint8_t led_unit, enum led_color color, enum led_state state)
 int led_on(uint8_t led_unit, ...)
 {
 	if (led_units[led_unit].unit_type == LED_MONOCHROME) {
-		return led_set(led_unit, LED_COLOR_WHITE, LED_SOLID);
+		return led_set(led_unit, LedColorType_LED_COLOR_WHITE, LedStateType_LED_STATE_TYPE_SOLID);
 	}
 
 	va_list args;
@@ -253,17 +251,17 @@ int led_on(uint8_t led_unit, ...)
 
 	va_end(args);
 
-	if (color <= 0 || color >= LED_COLOR_NUM) {
+	if (color <= 0 || color >= _LedColorType_ARRAYSIZE) {
 		LOG_ERR("Invalid color code %d", color);
 		return -EINVAL;
 	}
-	return led_set(led_unit, color, LED_SOLID);
+	return led_set(led_unit, color, LedStateType_LED_STATE_TYPE_SOLID);
 }
 
 int led_blink(uint8_t led_unit, ...)
 {
 	if (led_units[led_unit].unit_type == LED_MONOCHROME) {
-		return led_set(led_unit, LED_COLOR_WHITE, LED_BLINK);
+		return led_set(led_unit, LedColorType_LED_COLOR_WHITE, LedStateType_LED_STATE_TYPE_BLINK);
 	}
 
 	va_list args;
@@ -274,73 +272,124 @@ int led_blink(uint8_t led_unit, ...)
 
 	va_end(args);
 
-	if (color <= 0 || color >= LED_COLOR_NUM) {
+	if (color <= 0 || color >= _LedColorType_ARRAYSIZE) {
 		LOG_ERR("Invalid color code %d", color);
 		return -EINVAL;
 	}
 
-	return led_set(led_unit, color, LED_BLINK);
+	return led_set(led_unit, color, LedStateType_LED_STATE_TYPE_BLINK);
 }
 
 int led_off(uint8_t led_unit)
 {
-	return led_set(led_unit, LED_COLOR_OFF, LED_SOLID);
+	return led_set(led_unit, LedColorType_LED_COLOR_OFF, LedStateType_LED_STATE_TYPE_SOLID);
 }
 
-/**
- * @brief Periodically invoked by the timer to blink LEDs.
- */
-static ssize_t read_led_state(struct bt_conn *conn,
+static ssize_t read_get_led(struct bt_conn *conn,
                               const struct bt_gatt_attr *attr, void *buf,
                               uint16_t len, uint16_t offset) {
-  const struct led_control *values = attr->user_data;
-	uint16_t value_size = sizeof(struct led_control) * LED_UNIT_MAX;
-
-	for (uint8_t i = 0; i < leds_num; i++) {
-		LOG_DBG("[LED %d] LED Color: %d, LED Status: %d", i, values[i].color, values[i].state);
-	}
-
-  return bt_gatt_attr_read(conn, attr, buf, len, offset, values, value_size);
+	return BT_GATT_ERR(BT_ATT_ERR_NOT_SUPPORTED);
 }
 
-static ssize_t write_led_state(struct bt_conn *conn,
+static ssize_t write_get_led(struct bt_conn *conn,
                                const struct bt_gatt_attr *attr, const void *buf,
                                uint16_t len, uint16_t offset, uint8_t flags) {
-  struct led_control *values = attr->user_data;
-	uint16_t value_size = sizeof(struct led_control) * LED_UNIT_MAX;
+	GetLedRequest request = GetLedRequest_init_zero;
+	pb_istream_t stream = pb_istream_from_buffer(buf, len);
 
-	if (offset + len > value_size) {
-			LOG_ERR("Incoming data size exceeds expected array size.");
-			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+	if (!pb_decode(&stream, GetLedRequest_fields, &request)) {
+		LOG_ERR("Failed to decode GetLedRequest");
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 	}
 
-	// Write the incoming data into the array at the correct offset
-	memcpy((uint8_t *)values + offset, buf, len);
+	// Prepare the GetLedResponse
+	uint32_t led_id = request.led_id;
+	GetLedResponse response = GetLedResponse_init_zero;
+	response.led_id = led_id;
+	response.led_control.led_state_type = led_units[led_id].user_cfg.state;
+	response.led_control.led_color_type = led_units[led_id].user_cfg.color;
 
-	for (uint8_t i = 0; i < leds_num; i++) {
-		LOG_DBG("[LED %d] LED Color: %d, LED Status: %d", i, values[i].color, values[i].state);
-		switch (values[i].state) {
-			case LED_BLINK:
-				if (values[i].color == LED_COLOR_OFF) {
-					led_blink(i);
+	// Send the response back to the central
+	uint8_t responseData[GetLedResponse_size];
+	pb_ostream_t ostream = pb_ostream_from_buffer(responseData, sizeof(responseData));
+	
+	if (!pb_encode(&ostream, GetLedResponse_fields, &response)) {
+		LOG_ERR("Failed to encode GetLedResponse");
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+	}
+
+	bt_gatt_notify(conn, attr, responseData, ostream.bytes_written);
+  return len;
+}
+
+static ssize_t read_put_led(struct bt_conn *conn,
+                              const struct bt_gatt_attr *attr, void *buf,
+                              uint16_t len, uint16_t offset) {
+  return BT_GATT_ERR(BT_ATT_ERR_NOT_SUPPORTED);
+}
+
+static ssize_t write_put_led(struct bt_conn *conn,
+                               const struct bt_gatt_attr *attr, const void *buf,
+                               uint16_t len, uint16_t offset, uint8_t flags) {
+	PutLedRequest request = PutLedRequest_init_zero;
+	pb_istream_t stream = pb_istream_from_buffer(buf, len);
+
+	if (!pb_decode(&stream, PutLedRequest_fields, &request)) {
+		LOG_ERR("Failed to decode PutLedRequest");
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+	}
+
+	uint32_t led_id = request.led_id;
+	if (led_id < leds_num) {
+		switch (request.led_control.led_state_type) {
+			case LedStateType_LED_STATE_TYPE_BLINK:
+				if (led_units[led_id].led_no == LedColorType_LED_COLOR_OFF) {
+					led_blink(led_id);
 				} else {
-					led_blink(i, values[i].color);
+					led_blink(led_id, request.led_control.led_color_type);
 				}
 				break;
-			case LED_SOLID:
-				if (values[i].color == LED_COLOR_OFF) {
-					led_on(i);
+			case LedStateType_LED_STATE_TYPE_SOLID:
+				if (led_units[led_id].led_no == LedColorType_LED_COLOR_OFF) {
+					led_on(led_id);
 				} else {
-					led_on(i, values[i].color);
+					led_on(led_id, request.led_control.led_color_type);
 				}
 				break;
-			case LED_OFF:
-				led_off(i);
+			case LedStateType_LED_STATE_TYPE_OFF:
+				led_off(led_id);
 				break;
 		}
+	} else {
+		LOG_ERR("Invalid LED ID: %d\n", (int)request.led_id);
 	}
 
+	// Prepare the PutLedResponse
+	PutLedResponse response = PutLedResponse_init_zero;
+	response.led_id = led_id;
+	response.led_control.led_state_type = led_units[led_id].user_cfg.state;
+	response.led_control.led_color_type = led_units[led_id].user_cfg.color;
+
+	// Send the response back to the central
+	uint8_t responseData[PutLedResponse_size];
+	pb_ostream_t ostream = pb_ostream_from_buffer(responseData, sizeof(responseData));
+	
+	if (!pb_encode(&ostream, PutLedResponse_fields, &response)) {
+		LOG_ERR("Failed to encode PutLedResponse");
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+	}
+
+	bt_gatt_notify(conn, attr, responseData, ostream.bytes_written);
   return len;
+}
+
+static void ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value) {
+    bool notifications_enabled = (value == BT_GATT_CCC_NOTIFY);
+    if (notifications_enabled) {
+        LOG_INF("Notifications enabled");
+    } else {
+        LOG_INF("Notifications disabled");
+    }
 }
 
 /**
@@ -348,10 +397,16 @@ static ssize_t write_led_state(struct bt_conn *conn,
  */
 BT_GATT_SERVICE_DEFINE(
     led_svc, BT_GATT_PRIMARY_SERVICE(&led_svc_uuid),
-    BT_GATT_CHARACTERISTIC(&led_state_char_uuid.uuid,
-                           BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
+    BT_GATT_CHARACTERISTIC(&get_led_char_uuid.uuid,
+                           BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE | BT_GATT_CHRC_NOTIFY,
                            BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
-                           read_led_state, write_led_state, led_states), );
+                           NULL, write_get_led, NULL),
+		BT_GATT_CCC(ccc_cfg_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+    BT_GATT_CHARACTERISTIC(&put_led_char_uuid.uuid,
+                           BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE | BT_GATT_CHRC_NOTIFY,
+                           BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+                           NULL, write_put_led, NULL), 
+		BT_GATT_CCC(ccc_cfg_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),);
 
 int led_init(void)
 {

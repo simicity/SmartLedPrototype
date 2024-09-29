@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+enum LedStateType {
+  LED_STATE_TYPE_OFF = 0;
+  LED_STATE_TYPE_SOLID = 1;
+  LED_STATE_TYPE_BLINK = 2;
+}
+
+enum LedColorType {
+	LED_COLOR_OFF = 0;
+	LED_COLOR_RED = 1;
+	LED_COLOR_GREEN = 2;
+	LED_COLOR_YELLOW = 3;
+	LED_COLOR_BLUE = 4;
+	LED_COLOR_MAGENTA = 5;
+	LED_COLOR_CYAN = 6;
+	LED_COLOR_WHITE = 7;
+}
+
+message LedControl {
+  LedStateType led_state_type = 1;
+  LedColorType led_color_type = 2;
+}
+
+message GetLedRequest {
+  uint32 led_id = 1;
+}
+
+message GetLedResponse {
+  uint32 led_id = 1;
+  LedControl led_control = 2;
+}
+
+message PutLedRequest {
+  uint32 led_id = 1;
+  LedControl led_control = 2;
+}
+
+message PutLedResponse {
+  uint32 led_id = 1;
+  LedControl led_control = 2;
+}
+
+service LedStoreService {
+  rpc GetLed(GetLedRequest) returns (GetLedResponse) {}
+  rpc PutLed(PutLedRequest) returns (PutLedResponse) {}
+}

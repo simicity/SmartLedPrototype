@@ -8,3 +8,10 @@ target_sources(app PRIVATE
   src/main.c
   src/led.c
 )
+
+list(APPEND CMAKE_MODULE_PATH ${ZEPHYR_BASE}/modules/nanopb)
+include(nanopb)
+
+zephyr_nanopb_sources(app 
+  proto/led/led.proto
+)
